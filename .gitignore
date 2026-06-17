@@ -1,0 +1,5 @@
+captures/
+backup/
+__pycache__/
+*.etl
+*.pcapng
