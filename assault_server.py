@@ -300,12 +300,18 @@ def udp_listener(port, name):
         log("UDP", f"{name}:{port} <- {addr[0]}:{addr[1]}", data, force_hex=True)
 
 def main():
-    global VERBOSE
+    global VERBOSE, SERVER_IP
     ap = argparse.ArgumentParser()
     ap.add_argument("--verbose", action="store_true", help="hex-dump every packet")
     ap.add_argument("--extra-tcp", default="", help="comma ports to also log")
+    ap.add_argument("--advertise-ip", default="",
+                    help="IP to advertise in the server list (host's LAN/VPN IP for "
+                         "remote clients; default keeps the entry's built-in IP)")
     args = ap.parse_args()
     VERBOSE = args.verbose
+    if args.advertise_ip:
+        SERVER_IP = args.advertise_ip
+        log("INFO", f"advertising server IP {SERVER_IP} in the server list")
 
     log("INFO", f"logging to {LOGFILE}")
     ports = dict(PORTS)

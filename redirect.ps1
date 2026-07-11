@@ -8,7 +8,10 @@
       powershell -ExecutionPolicy Bypass -File redirect.ps1
       powershell -ExecutionPolicy Bypass -File redirect.ps1 -Restore
 #>
-param([switch]$Restore)
+# -Target is the emulator's IP the client should talk to:
+#   127.0.0.1  (default) = emulator runs on THIS pc
+#   <host IP>            = emulator runs on another pc (LAN/Hamachi/Radmin) -> point here
+param([switch]$Restore, [string]$Target = "127.0.0.1")
 
 $ErrorActionPreference = "Stop"
 $Game   = "C:\Program Files (x86)\CodiNET\Assault"
@@ -16,13 +19,13 @@ $Backup = Join-Path $PSScriptRoot "backup"
 $Hosts  = "$env:windir\System32\drivers\etc\hosts"
 $Marker = "# ---- AssaultServer redirect ----"
 
-# original IP -> replacement (byte-level, preserves ANSI/cp949 encoding)
+# original CodiNET IP -> $Target (byte-level, preserves ANSI/cp949 encoding)
 $IpMap = @{
-    "203.248.248.54"  = "127.0.0.1"   # Server List
-    "203.248.248.58"  = "127.0.0.1"   # Round
-    "203.248.248.56"  = "127.0.0.1"   # Billing
-    "61.74.201.227"   = "127.0.0.1"   # AutoPatch
-    "211.40.79.79"    = "127.0.0.1"   # (commented alt list)
+    "203.248.248.54"  = $Target   # Server List
+    "203.248.248.58"  = $Target   # Round
+    "203.248.248.56"  = $Target   # Billing
+    "61.74.201.227"   = $Target   # AutoPatch
+    "211.40.79.79"    = $Target   # (commented alt list)
 }
 $IniFiles  = @("System.ini","Billing.ini","Patch.ini")
 $HostNames = @("autopatch.codinet.com","assault.codinet.com","cgi.codinet.com")
@@ -71,13 +74,13 @@ Backup-File $Hosts
 $content = Get-Content $Hosts -Raw
 if ($content -notlike "*$Marker*") {
     $block = "`r`n$Marker`r`n"
-    foreach ($h in $HostNames) { $block += "127.0.0.1`t$h`r`n" }
+    foreach ($h in $HostNames) { $block += "$Target`t$h`r`n" }
     $block += "$Marker`r`n"
     Add-Content -Path $Hosts -Value $block -Encoding Default
-    Write-Host "  hosts entries added" -ForegroundColor Green
+    Write-Host "  hosts entries added -> $Target" -ForegroundColor Green
 } else {
     Write-Host "  hosts already has redirect block" -ForegroundColor Yellow
 }
 
-Write-Host "`nDone. Now run:  py capture_server.py" -ForegroundColor Cyan
-Write-Host "Then launch the game. Undo later with: redirect.ps1 -Restore"
+Write-Host "`nDone (target $Target). Now run:  .\play.ps1" -ForegroundColor Cyan
+Write-Host "Undo later with: .\redirect.ps1 -Restore"

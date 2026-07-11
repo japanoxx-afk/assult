@@ -1,68 +1,97 @@
 <#
-  play.ps1 - one-click Assault launcher for Win11.
+  play.ps1 - one-command Assault launcher (host / client / dedicated-server).
 
-  What it does (all reverse-engineered this project):
-    1. Ensures DDrawCompat's ddraw.dll is in the game folder. main.dat uses
-       DirectDraw + Direct3D7, broken on Win11 -> crashes 0xC0000005 without it.
-       cnc-ddraw does NOT work (2D only); DDrawCompat provides a D3D7 HAL.
-    2. Starts the server emulator (assault_server.py) if not already running.
-    3. Launches main.dat DIRECTLY, bypassing Assault.exe/Assault.dat.
-       Why bypass: Assault.dat's "Connect" builds a broken command line
-       (mangles the entry into 11+ tokens, truncates the IP) so main.dat rejects
-       it with "Wrong parameter" (it requires argc == 8, i.e. exactly 7 tokens).
-       We hand main.dat a clean 7-token arg instead.
-    4. Pins the process to ONE cpu core -> dodges main.dat's fast-multicore
-       startup race (children inherit the affinity).
+  Roles (auto-detected from -ServerIP):
+    * -ServerIP is THIS pc (127.0.0.1 or one of my own IPs)  -> HOST+PLAY:
+        starts the emulator, opens the firewall, then launches the game locally.
+    * -ServerIP is a REMOTE pc                               -> CLIENT:
+        does NOT start the emulator; points billing at the host and launches
+        the game against the host's emulator.
+    * -ServerOnly                                            -> DEDICATED SERVER:
+        starts the emulator + firewall only (host runs this; friends then use
+        `.\play.ps1 -ServerIP <hostIP>`).
 
-  Usage:
-    powershell -ExecutionPolicy Bypass -File .\play.ps1 [-User <id>] [-Pass <pw>]
+  Examples:
+    .\play.ps1                                  # solo, everything on this pc
+    .\play.ps1 -ServerOnly                      # run the server for friends
+    .\play.ps1 -ServerIP 25.12.95.154 -User me -Pass pw   # join a friend's host
 
-  Prereq (one-time, as Administrator):  .\redirect.ps1
+  NOTE (honest): the emulator does NOT yet sync two clients into the same room,
+  so this only gets a second pc to LOG IN to the host - real 2-player battles
+  still need the room/match/P2P protocol. Firewall/emulator steps need admin.
+
+  Prereq (host, one-time): .\redirect.ps1
 #>
 param(
-    [string]$User = "Assault",
-    [string]$Pass = "nopass",
-    [string]$ServerIP = "127.0.0.1",
-    [int]$ServerPort = 11131
+    [string]$ServerIP  = "127.0.0.1",
+    [string]$User      = "Assault",
+    [string]$Pass      = "nopass",
+    [int]   $Port      = 11131,
+    [switch]$ServerOnly
 )
 $ErrorActionPreference = "Stop"
 $Game = "C:\Program Files (x86)\CodiNET\Assault"
 $Here = $PSScriptRoot
 
-# --- 1. DDrawCompat ddraw.dll (D3D7 HAL for Win11) ---------------------------
+function Test-Local([string]$ip) {
+    if ($ip -in @("127.0.0.1", "localhost", "::1")) { return $true }
+    $mine = (Get-NetIPAddress -AddressFamily IPv4 -ErrorAction SilentlyContinue).IPAddress
+    return ($mine -contains $ip)
+}
+$isHost = $ServerOnly -or (Test-Local $ServerIP)
+
+# --- firewall + emulator (host / dedicated-server only) ----------------------
+if ($isHost) {
+    try {
+        Remove-NetFirewallRule -DisplayName "Assault Emu" -ErrorAction SilentlyContinue
+        New-NetFirewallRule -DisplayName "Assault Emu" -Direction Inbound -Protocol TCP `
+            -LocalPort 10131,10525,10905,11131,9011 -Action Allow | Out-Null
+        Write-Host "Firewall opened for the emulator ports." -ForegroundColor Green
+    } catch { Write-Warning "Could not open the firewall (run as Administrator to allow remote clients)." }
+
+    if (-not (Get-Process python -ErrorAction SilentlyContinue)) {
+        $adv = if ($ServerOnly) { @("--advertise-ip", ((Get-NetIPAddress -AddressFamily IPv4 |
+                 Where-Object { $_.IPAddress -notlike "127.*" -and $_.IPAddress -notlike "169.254.*" } |
+                 Select-Object -First 1).IPAddress)) } else { @() }
+        Start-Process py -ArgumentList (@("assault_server.py") + $adv) -WorkingDirectory $Here -WindowStyle Minimized
+        Start-Sleep -Seconds 2
+        Write-Host "Emulator started." -ForegroundColor Green
+    } else { Write-Host "Emulator already running." -ForegroundColor DarkGray }
+}
+
+if ($ServerOnly) {
+    $ips = (Get-NetIPAddress -AddressFamily IPv4 | Where-Object {
+                $_.IPAddress -notlike "127.*" -and $_.IPAddress -notlike "169.254.*" }).IPAddress
+    Write-Host ""
+    Write-Host "Dedicated server running. Friends join with:" -ForegroundColor Cyan
+    foreach ($ip in $ips) { Write-Host "    .\play.ps1 -ServerIP $ip -User <id> -Pass <pw>" }
+    return
+}
+
+# --- DDrawCompat ddraw.dll (needed on EVERY pc that runs the game) ------------
 $ddraw = Join-Path $Game "ddraw.dll"
 if (-not (Test-Path $ddraw) -or ((Get-Item $ddraw).Length -lt 2MB)) {
     $src = "C:\Program Files (x86)\Steam\steamapps\common\Command & Conquer Red Alert II\ddraw.dll"
-    if (Test-Path $src) {
-        Copy-Item $src $ddraw -Force
-        Write-Host "Installed DDrawCompat ddraw.dll." -ForegroundColor Green
-    } else {
-        Write-Warning "DDrawCompat ddraw.dll not found - main.dat will crash. Put a DDrawCompat ddraw.dll in $Game."
-    }
+    if (Test-Path $src) { Copy-Item $src $ddraw -Force; Write-Host "Installed DDrawCompat ddraw.dll." -ForegroundColor Green }
+    else { Write-Warning "DDrawCompat ddraw.dll missing - the game will crash on Win11. Put a DDrawCompat ddraw.dll in $Game." }
 }
 
-# --- 2. start the emulator (server) ------------------------------------------
-if (-not (Get-Process python -ErrorAction SilentlyContinue)) {
-    Start-Process py -ArgumentList "assault_server.py" -WorkingDirectory $Here -WindowStyle Minimized
-    Start-Sleep -Seconds 2
-    Write-Host "Emulator started." -ForegroundColor Green
-} else {
-    Write-Host "Emulator already running." -ForegroundColor DarkGray
+# --- point the billing/login server (Billing.ini) at $ServerIP ----------------
+$billing = Join-Path $Game "Billing.ini"
+if (Test-Path $billing) {
+    $txt = [System.IO.File]::ReadAllText($billing)
+    $new = [regex]::Replace($txt, '(?m)^(BI\s*=).*$', "`${1}$ServerIP")
+    if ($new -ne $txt) { [System.IO.File]::WriteAllText($billing, $new); Write-Host "Billing.ini -> $ServerIP" -ForegroundColor DarkGray }
 }
 
-# --- 3+4. launch main.dat directly, single-core, clean 7-token arg -----------
-# arg tokens:  <id> <name> <pass> <flag> <ip> <port> <tail>
-#   token2 -> login username, token3 -> login password,
-#   token5 -> game-server IP, token6 -> game-server port.
-$arg = "1 $User $Pass 1 $ServerIP $ServerPort 0"
-$exe = Join-Path $Game "main.dat"
-
+# --- launch main.dat directly, single-core, clean 7-token arg -----------------
+$arg = "1 $User $Pass 1 $ServerIP $Port 0"
 $si = New-Object System.Diagnostics.ProcessStartInfo
-$si.FileName = $exe
+$si.FileName = Join-Path $Game "main.dat"
 $si.Arguments = $arg
 $si.WorkingDirectory = $Game
 $si.UseShellExecute = $false
 $p = [System.Diagnostics.Process]::Start($si)
 try { $p.ProcessorAffinity = [IntPtr]1 } catch {}
-Write-Host "Launched main.dat (pid $($p.Id)) as '$User' -> ${ServerIP}:${ServerPort}, pinned to core 0." -ForegroundColor Cyan
-Write-Host "arg: main.dat $arg" -ForegroundColor DarkGray
+$role = if (Test-Local $ServerIP) { "HOST" } else { "CLIENT -> $ServerIP" }
+Write-Host "Launched main.dat (pid $($p.Id)) [$role] as '$User' -> ${ServerIP}:${Port}, core 0." -ForegroundColor Cyan
