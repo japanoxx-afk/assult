@@ -2,7 +2,9 @@
 
 Ports (discovered via pktmon loopback, passed as args not in ini):
 - TCP 10131 : control channel, CLIENT speaks first
-- TCP 28194 : data/file transfer, client connects and waits for server
+- ~~TCP 28194 : data/file transfer~~ — WRONG. A live run showed 28194 traffic is
+  Streamlabs Desktop's JSON-RPC API (`getScenes`/`ScenesService`), an unrelated
+  app, not the game. When CheckVersion says "up to date" no data channel is used.
 
 Frame:  F1 [len:2 LE, includes both markers] [payload...] F2
 Dispatcher @0x10001290: opcode = word at byte offset 3 (LE).

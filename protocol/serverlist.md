@@ -19,12 +19,43 @@ Assault.dat parses a server entry via sscanf:
   (also seen: "%d noname nopass 0 %s %d 0", "%d %s %s 1 %s %s 1")
 After server pick, Assault.dat launches:  main.dat <args>  (formats "main.dat %s", "%smain.dat")
 
-## STATUS
-First empirical reply (flag=1,word=1, entry "1 TestServer nopass 1 127.0.0.1 9010 0"
-duplicated as string1+string2) was RECEIVED by the client, but Assault.dat then
-RST'd the connection -> format mismatch. Suspect the string2 offset (+4 gap, not
-immediately after string1's null) and/or the flag/word/string-role mapping.
+## STATUS — SOLVED and verified live (2026-07-10)
+SelectServer.dll 0x10001500 passes BOTH strings + a flag + a word to Assault.dat's
+callback: `callback(string1, flag, word, string2)`, with `string2` at
+`data + strlen(string1) + 4` (the byte after string1's null). The reply payload is:
 
-NEXT: reverse Assault.dat callback (the object whose vtable[+8] is called) to learn
-exactly what string1 vs string2 must contain and the count/flag semantics; then
-iterate the 10525 reply until the server list populates and main.dat is launched.
+    [flag:1] [count:2 LE] [string1\0] [string2\0]
+
+Reply shape that actually works (found by live A/B testing — screenshot + process
+survival, since a wrong shape makes Assault.dat crash at 0x302030 and the launcher
+relaunches, looking like an "empty list + instant exit"):
+
+  * `string1` must be **EMPTY**; the server entry goes in **`string2`**.
+    (Putting the entry in string1 crashes/rejects — the shell exits.)
+  * `flag` byte = the **capacity** shown in the "이용상태" column:
+    `0` -> "좋음" (connectable);  `1` -> "사용자많음" -> Connect is REFUSED
+    with a "사용자가 너무 많습니다" message box. Use **flag=0**.
+  * `count` word = 1.
+  * entry grammar (Assault.dat sprintf/sscanf `"%d %s %s 1 %s %d 0"`):
+    `id name pass 1 IP port 0`  e.g. `1 Assault nopass 1 127.0.0.1 9010 0`.
+
+With this, the server row appears as "좋음" and clicking **Connect** is accepted:
+Assault.dat writes the pick into `System.ini [System Config] Server Name=` and
+CreateProcessA's `main.dat <server-info>`, then the shell exits.
+
+Implemented in `assault_server.py` (`reply_serverlist`, `SERVER_FLAG=0`).
+
+## NEXT BLOCKER — main.dat exits before login (client-side, not protocol)
+`main.dat` (the real game exe) exits cleanly and instantly on launch — **before**
+loading any module DLL, before DirectDraw init, before writing its own
+`AssaultLogFile.txt` — both standalone and via the real Connect flow. So login
+(BillingNet :10905) is never reached. Two client-side problems, both outside the
+server emulation:
+  1. An early startup guard in main.dat's InitInstance (uses OpenFileMappingA /
+     shared memory; likely a launch-token / single-instance / parent check that
+     the modern-hardware launch race or standalone launch doesn't satisfy).
+  2. This install's `Dlls\` is **incomplete**: main.dat loads `Dlls\4.dat`
+     (and the folder is also missing 2,5,6,7,8,9,10.dat). `Dlls\4.dat` does not
+     exist here, so even past the guard it would fail with "4.dat dll Load failure".
+Resolving these needs the complete original game files and/or reversing main.dat's
+InitInstance guard — tracked separately from the server work.
